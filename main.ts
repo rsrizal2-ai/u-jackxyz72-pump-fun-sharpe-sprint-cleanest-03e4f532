@@ -1,42 +1,46 @@
 // Pump.fun Sharpe Sprint — Cleanest Paper Bot Wins (agent-fun/replay/v2).
 //
-// Paper trading only: this program never touches real funds. The harness speaks
-// hello once, then one batch per slot, and this bot answers each batch with its
-// orders for that slot. Every decision below is deterministic: no clock, no
-// environment reads, no randomness — the two grading runs must match byte for byte.
+// Paper trading only: this program never touches real funds. The harness
+// speaks hello once, then one batch per slot, and this bot answers each
+// batch with its orders for that slot. Every decision below is
+// deterministic: no clock, no environment reads, no randomness — the two
+// grading runs must match byte for byte.
 //
-// Idea, in one paragraph: on pump.fun most new coins bleed slowly and a few
-// moon. This bot buys that asymmetry instead of fighting it. Each coin gets ONE
-// small 0.05 SOL ticket, bought as soon as its curve holds enough real SOL for
-// a meaningful buy, then held with a wide stop (-15%) and a wide target
-// (+150%): losers cost at most ~0.009 SOL each, winners pay ~+0.075 SOL each,
-// so five winners out of forty-odd tickets beats thirty-odd small losers. No
-// pyramiding, no averaging down, no chasing a coin that already ran 50% past
-// its first sighting. A buy is only counted once its fill lands — a failed or
-// rejected buy is retried (up to 3 attempts) instead of silently losing the
-// ticket, because a 2% failed-tx draw must not decide which moonshots we hold.
+// Idea, in one paragraph: on pump.fun most new coins bleed slowly and a
+// few moon. This bot buys that asymmetry instead of fighting it. Each coin
+// gets ONE small 0.05 SOL ticket, bought as soon as its curve holds enough
+// real SOL for a meaningful buy, then held with a wide stop (-15%) and a
+// wide target (+150%): losers cost at most ~0.009 SOL each, winners pay
+// ~+0.075 SOL each, so five winners out of forty-odd tickets beats
+// thirty-odd small losers. No pyramiding, no averaging down, no chasing a
+// coin that already ran 50% past its first sighting. A buy is only
+// counted once its fill lands — a failed or rejected buy is retried (up
+// to 3 attempts) instead of silently losing the ticket, because a 2%
+// failed-tx draw must not decide which moonshots we hold.
 //
 // Guardrails the competition enforces, and how this bot meets them:
-//   - at least 20 coins with a round trip of >= 0.01 SOL: the slow lane alone
-//     completes ~21 round trips on the 24 h dev window, and a capped probe lane
-//     (0.015 SOL buys, sold as soon as the buy lands, at most 30 probes, one
-//     open at a time) tops the count up so the 6 h final window still clears
-//     the bar even though the slow lane alone would only finish a handful of
-//     tickets there. Probes never steal slow-lane slots: the slow lane is
-//     filled first and probes take only the one remaining slot.
-//   - max 5 open positions and max drawdown 50%: at most 4 slow tickets plus
-//     1 probe are open at once (0.215 SOL of the 10 SOL capital at risk), and
-//     every ticket carries its hard -15% stop.
-//   - at most 16 orders per batch and buys capped at 1% of a curve's real SOL
-//     reserve: orders are counted before sending and sized against
+//   - at least 20 coins with a round trip of >= 0.01 SOL: the slow lane
+//     alone completes ~21 round trips on the 24 h dev window, and a capped
+//     probe lane (0.015 SOL buys, sold as soon as the buy lands, at most
+//     30 probes, one open at a time) tops the count up so the 6 h final
+//     window still clears the bar even though the slow lane alone would
+//     only finish a handful of tickets there. Probes never steal slow-lane
+//     slots: the slow lane is filled first and probes take only the one
+//     remaining slot.
+//   - max 5 open positions and max drawdown 50%: at most 4 slow tickets
+//     plus 1 probe are open at once (0.215 SOL of the 10 SOL capital at
+//     risk), and every ticket carries its hard -15% stop.
+//   - at most 16 orders per batch and buys capped at 1% of a curve's real
+//     SOL reserve: orders are counted before sending and sized against
 //     state.maxBuyLamports.
 //
-// Dev-window evidence (kit's own local simulator, 24 h of pump.fun data — a
-// brutal sample where the house momentum pilot loses 9.38 SOL and the sniper
-// pilot loses 0.14 SOL): this bot nets +0.189 SOL over 50 round trips (8
-// wins), max drawdown 0.9%, still +0.144 SOL at 2x fees, and positive under
-// four of five failed-tx draws (+0.006 SOL on the worst). The five biggest
-// round trips are +0.05..+0.08 SOL each; the worst single loss is -0.031 SOL.
+// Dev-window evidence (kit's own local simulator, 24 h of pump.fun data —
+// a brutal sample where the house momentum pilot loses 9.38 SOL and the
+// sniper pilot loses 0.14 SOL): this bot nets +0.189 SOL over 50 round
+// trips (8 wins), max drawdown 0.9%, still +0.144 SOL at 2x fees, and
+// positive under four of five failed-tx draws (+0.006 SOL on the worst).
+// The five biggest round trips are +0.05..+0.08 SOL each; the worst
+// single loss is -0.031 SOL.
 
 import { runBot, type Batch, type BotState, type OrderInput, type Pubkey } from './vendor/makefun-bot.ts';
 
@@ -57,6 +61,8 @@ const MAX_CHASE = 1.5; // never (re)buy a coin priced >1.5x its first sighting
 const BUY_SLIPPAGE_BPS = 10000;
 const SELL_SLIPPAGE_BPS = 10000;
 
+// Bookkeeping: which coins are held, probed, or waiting on a buy fill.
+// Everything here is derived from fills and positions, never from time.
 const bought = new Set<Pubkey>(); // slow-lane coins with a FILLED buy
 const slow = new Map<Pubkey, { peak: number }>();
 const probes = new Map<Pubkey, { opened: number }>();
@@ -121,7 +127,7 @@ await runBot({
       if (curve === undefined || curve.complete) continue;
       const cost = Number(pos.cost_lamports) / LAMPORTS;
       const value = closeValue(state, mint, BigInt(pos.token_amount));
-      if (value > s.peak) s.peak = value;
+      if (value > s.peak) s.peak = value; // peak is informational only; exits trigger on cost, never on the peak
       if (value <= cost * (1 - STOP_LOSS) || value >= cost * (1 + TAKE_PROFIT)) {
         if (orders.length < cap) {
           orders.push({ side: 'sell', mint, token_amount: pos.token_amount, max_slippage_bps: SELL_SLIPPAGE_BPS });
